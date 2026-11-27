@@ -3,6 +3,39 @@ local uv = vim.uv
 local M = {}
 local attached = {}
 local session
+local key_namespace = api.nvim_create_namespace("ReplayKeys")
+local modifiers = { C = "Ctrl+", S = "Shift+", M = "Alt+", D = "Super+", T = "Meta+" }
+if vim.fn.has("mac") == 1 then
+  modifiers.C, modifiers.M, modifiers.D = "⌃", "⌥", "⌘"
+end
+local key_names = {
+  CR = "Enter",
+  BS = "Backspace",
+  Del = "Delete",
+  lt = "<",
+  Up = "↑",
+  Down = "↓",
+  Left = "←",
+  Right = "→",
+}
+
+local function key_label(name)
+  local prefix = ""
+  while name:sub(2, 2) == "-" and modifiers[name:sub(1, 1)] do
+    prefix = prefix .. modifiers[name:sub(1, 1)]
+    name = name:sub(3)
+  end
+  if
+    name == "Ignore"
+    or name:find("Mouse", 1, true)
+    or name:match("Drag$")
+    or name:match("Release$")
+    or name:match("^ScrollWheel")
+  then
+    return ""
+  end
+  return prefix .. (key_names[name] or name)
+end
 
 local function eligible(buf)
   return api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == "" and vim.bo[buf].buflisted
@@ -153,6 +186,16 @@ function M.start(send)
     group = api.nvim_create_augroup("ReplayCapture", { clear = true }),
   }
   session = state
+  vim.on_key(function(_, typed)
+    -- Terminal applications and masked prompts can accept input that the screen hides.
+    if typed == "" or api.nvim_get_mode().mode == "t" or vim.fn.getcmdtype() == "-" then
+      return
+    end
+    local label = vim.fn.keytrans(typed):gsub("<([^<>]+)>", key_label)
+    if label ~= "" then
+      emit("key_press", { key = label })
+    end
+  end, key_namespace)
   for _, buf in ipairs(api.nvim_list_bufs()) do
     attach(buf)
   end
@@ -215,6 +258,7 @@ function M.stop(discard)
   if session then
     local state = session
     session = nil
+    vim.on_key(nil, key_namespace)
     api.nvim_del_augroup_by_id(state.group)
     state.timer:close()
     if not discard then

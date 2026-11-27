@@ -8,7 +8,7 @@ use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, PhysicalGlyph, Shaping, Style, SwashCache,
     SwashContent, SwashImage, Weight, Wrap, fontdb,
 };
-use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
 
 use super::headless_nvim::{Cell, CursorShape, Grid, Highlight};
 
@@ -26,6 +26,7 @@ pub struct Rasterizer {
     family: String,
     icon_family: Option<String>,
     buffer: Buffer,
+    keystroke: Buffer,
     swash: SwashCache,
     glyphs: HashMap<(Arc<str>, bool, bool), Vec<PhysicalGlyph>>,
     baseline: f32,
@@ -121,6 +122,7 @@ impl Rasterizer {
             family,
             icon_family,
             buffer,
+            keystroke: Buffer::new_empty(Metrics::new(30.0, 38.0)),
             swash: SwashCache::new(),
             glyphs: HashMap::new(),
             baseline,
@@ -134,7 +136,12 @@ impl Rasterizer {
     }
 
     /// Render a complete grid. Use elapsed video time to advance cursor motion.
-    pub fn render(&mut self, grid: &Grid, elapsed: Duration) -> io::Result<RgbaFrame<'_>> {
+    pub fn render(
+        &mut self,
+        grid: &Grid,
+        elapsed: Duration,
+        key: Option<&str>,
+    ) -> io::Result<RgbaFrame<'_>> {
         let (columns, rows) = grid.dimensions();
         if columns == 0 || rows == 0 {
             return Err(io::Error::new(
@@ -211,12 +218,92 @@ impl Rasterizer {
             }
         }
         self.draw_cursor(grid, elapsed);
+        if let Some(key) = key.filter(|key| !key.is_empty()) {
+            self.draw_keystroke(key);
+        }
 
         Ok(RgbaFrame {
             width,
             height,
             pixels: self.pixmap.data(),
         })
+    }
+
+    fn draw_keystroke(&mut self, key: &str) {
+        let width = self.pixmap.width() as f32;
+        let height = self.pixmap.height() as f32;
+        let scale = (width / 1920.0).min(height / 1080.0);
+        let margin = 28.0 * scale;
+        let padding = 18.0 * scale;
+        let text_height = 38.0 * scale;
+        let box_height = 62.0 * scale;
+        let radius = 12.0 * scale;
+
+        self.keystroke
+            .set_metrics(Metrics::new(30.0 * scale, text_height));
+        self.keystroke.set_text(
+            key,
+            &Attrs::new()
+                .family(Family::Name(&self.family))
+                .weight(Weight::BOLD),
+            Shaping::Advanced,
+            None,
+        );
+        self.keystroke.shape_until_scroll(&mut self.fonts, false);
+        let Some(line) = self.keystroke.layout_runs().next() else {
+            return;
+        };
+        let box_width = (line.line_w.ceil() + padding * 2.0)
+            .max(76.0 * scale)
+            .min(width - 2.0 * margin);
+        let right = width - margin;
+        let bottom = height - margin;
+        let left = right - box_width;
+        let top = bottom - box_height;
+        let mut path = PathBuilder::new();
+        path.move_to(left + radius, top);
+        path.line_to(right - radius, top);
+        path.quad_to(right, top, right, top + radius);
+        path.line_to(right, bottom - radius);
+        path.quad_to(right, bottom, right - radius, bottom);
+        path.line_to(left + radius, bottom);
+        path.quad_to(left, bottom, left, bottom - radius);
+        path.line_to(left, top + radius);
+        path.quad_to(left, top, left + radius, top);
+        path.close();
+        if let Some(path) = path.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color(0, 192));
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+
+        let Some(bounds) = Rect::from_xywh(
+            (left + padding).round(),
+            (top + (box_height - text_height) / 2.0).round(),
+            box_width - padding * 2.0,
+            text_height,
+        ) else {
+            return;
+        };
+        let remaining = bounds.width() - line.line_w;
+        // Keep the newest keys in view if the sequence is wider than the box.
+        let offset = if remaining < 0.0 {
+            remaining
+        } else {
+            remaining / 2.0
+        };
+        for glyph in line.glyphs {
+            let glyph = glyph.physical((offset, line.line_y), 1.0);
+            if let Some(image) = self.swash.get_image(&mut self.fonts, glyph.cache_key) {
+                blend_glyph(&mut self.pixmap, bounds, &glyph, image, 0xff_ff_ff);
+            }
+        }
     }
 
     fn cell_bounds(&self, col: f32, row: f32, span: u32) -> Option<Rect> {
