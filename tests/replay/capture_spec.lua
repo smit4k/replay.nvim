@@ -1,6 +1,20 @@
 local capture = require("replay.capture")
 
 describe("replay keystrokes", function()
+  it("leaves keystroke capture off by default", function()
+    local keys = {}
+    capture.start(function(kind, event)
+      if kind == "key_press" then
+        keys[#keys + 1] = event.key
+      end
+    end)
+
+    vim.api.nvim_feedkeys(vim.keycode("<F6>"), "xt", false)
+    capture.stop()
+
+    assert.same({}, keys)
+  end)
+
   it("captures typed keys during recording and skips masked input", function()
     local keys = {}
     vim.keymap.set("n", "<F5>", "l")
@@ -9,7 +23,7 @@ describe("replay keystrokes", function()
       if kind == "key_press" then
         keys[#keys + 1] = event.key
       end
-    end)
+    end, true)
 
     vim.api.nvim_feedkeys(vim.keycode("<F5><C-L><D-Right><M-Up><Down><Left><Space>:<CR>"), "xt", false)
     vim.defer_fn(function()

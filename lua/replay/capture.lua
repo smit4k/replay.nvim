@@ -178,7 +178,7 @@ local function queue(kind, fields)
   end
 end
 
-function M.start(send)
+function M.start(send, keystrokes)
   local state = {
     emit = send,
     seen = {},
@@ -187,16 +187,18 @@ function M.start(send)
     group = api.nvim_create_augroup("ReplayCapture", { clear = true }),
   }
   session = state
-  vim.on_key(function(_, typed)
-    -- Terminal applications and masked prompts can accept input that the screen hides.
-    if typed == "" or api.nvim_get_mode().mode == "t" or vim.fn.getcmdtype() == "-" then
-      return
-    end
-    local label = vim.fn.keytrans(typed):gsub("<([^<>]+)>", key_label)
-    if label ~= "" then
-      emit("key_press", { key = label })
-    end
-  end, key_namespace)
+  if keystrokes then
+    vim.on_key(function(_, typed)
+      -- Terminal applications and masked prompts can accept input that the screen hides.
+      if typed == "" or api.nvim_get_mode().mode == "t" or vim.fn.getcmdtype() == "-" then
+        return
+      end
+      local label = vim.fn.keytrans(typed):gsub("<([^<>]+)>", key_label)
+      if label ~= "" then
+        emit("key_press", { key = label })
+      end
+    end, key_namespace)
+  end
   for _, buf in ipairs(api.nvim_list_bufs()) do
     attach(buf)
   end

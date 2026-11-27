@@ -49,6 +49,8 @@ impl KeySequence {
 pub(crate) struct RenderOptions {
     #[serde(flatten)]
     startup: NvimStartup,
+    #[serde(default)]
+    keystrokes: bool,
     font: Option<String>,
     height: Option<u32>,
     scale: Option<u32>,
@@ -170,7 +172,9 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
                         grid_changed = true;
                     }
                 }
-                Event::KeyPress { key } if !key.is_empty() => keys.push(update.timestamp_ns, key),
+                Event::KeyPress { key } if options.keystrokes && !key.is_empty() => {
+                    keys.push(update.timestamp_ns, key);
+                }
                 _ => {}
             }
             next = updates.next().transpose()?;

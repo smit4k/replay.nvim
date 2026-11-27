@@ -7,6 +7,7 @@ local sidecar = vim.api.nvim_get_runtime_file("renderer/target/release/" .. exec
 local recording
 local rendering
 local last_path
+local keystrokes = false
 local render = {}
 
 local function report(err)
@@ -64,6 +65,9 @@ function M.setup(opts)
   if opts.sidecar then
     sidecar = opts.sidecar
   end
+  if opts.keystrokes ~= nil then
+    keystrokes = opts.keystrokes == true
+  end
   render = opts.render or render
 end
 
@@ -101,7 +105,7 @@ function M.start(path)
       fields.timestamp_ns = vim.uv.hrtime() - started_at
       ipc.notify("record_event", { fields })
     end
-    capture.start(current.emit)
+    capture.start(current.emit, keystrokes)
     screen.start(current.emit)
   end
 end
@@ -148,6 +152,7 @@ function M.render(input_or_output, output, ...)
       executable = vim.v.progpath,
       vimrc = render_vimrc(),
       cwd = vim.fn.getcwd(),
+      keystrokes = keystrokes,
       font = render.font,
       height = render.height,
       scale = render.scale,
