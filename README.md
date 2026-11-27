@@ -1,47 +1,32 @@
-# A Neovim Plugin Template
+# replay.nvim
 
-![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/ellisonleao/nvim-plugin-template/lint-test.yml?branch=main&style=for-the-badge)
-![Lua](https://img.shields.io/badge/Made%20with%20Lua-blueviolet.svg?style=for-the-badge&logo=lua)
+Record a Neovim session to a `.nvimreplay` file, scrub through it in the editor, or export it as a video.
 
-A template repository for Neovim plugins.
+## Install with lazy.nvim
 
-## Using it
+Use Neovim 0.10 or later and a Rust toolchain to build the sidecar. For video export, install FFmpeg with `libx264` for MP4 or `ffv1` for MKV, and make sure `nvim` and `ffmpeg` are on your `PATH`.
 
-Via `gh`:
-
+```lua
+return {
+  "smit4k/replay.nvim",
+  main = "replay",
+  cmd = { "ReplayStart", "ReplayStop", "ReplayOpen", "ReplayRender" },
+  build = "cargo build --release --locked --target-dir target",
+  opts = {},
+}
 ```
-$ gh repo create my-plugin -p ellisonleao/nvim-plugin-template
+
+For a local checkout, replace `"smit4k/replay.nvim"` with `dir = "/path/to/replay.nvim"`, set `name = "replay.nvim"`, and run `:Lazy build replay.nvim`.
+
+## Record and replay
+
+```vim
+:ReplayStart demo.nvimreplay
+:ReplayStop
+:ReplayOpen demo.nvimreplay
+:ReplayRender demo.mp4
 ```
 
-Via github web page:
+In the replay tab, use **Left** and **Right** to step through frames, **Space** to play or pause, and **1–5** to change speed.
 
-Click on `Use this template`
-
-![](https://docs.github.com/assets/cb-36544/images/help/repository/use-this-template-button.png)
-
-## Features and structure
-
-- 100% Lua
-- Github actions for:
-  - running tests using [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) and [busted](https://olivinelabs.com/busted/)
-  - check for formatting errors (Stylua)
-  - vimdocs autogeneration from README.md file
-  - luarocks release (LUAROCKS_API_KEY secret configuration required)
-
-### Plugin structure
-
-```
-.
-├── lua
-│   ├── plugin_name
-│   │   └── module.lua
-│   └── plugin_name.lua
-├── Makefile
-├── plugin
-│   └── plugin_name.lua
-├── README.md
-├── tests
-│   ├── minimal_init.lua
-│   └── plugin_name
-│       └── plugin_name_spec.lua
-```
+Video export shows the active buffer, cursor, and scroll position at 1080p and 60 fps. Use an `.mp4` or `.mkv` filename and wait for the save notification before closing Neovim. Existing output files are protected.

@@ -7,6 +7,7 @@
 //! - push_event(event) -> nil; also accepted as a notification
 //! - open_replay(path) -> ReplayInfo
 //! - seek_to(timestamp_ns) -> SeekResult
+//! - replay_render(input_path, output_path) -> nil
 //!
 //! The Lua client also uses record_start, record_stop, record_event,
 //! replay_open, and replay_seek. Its events use "kind", "buf", and "win"
@@ -42,6 +43,13 @@ pub(crate) const CHUNK_HEADER_SIZE: usize = 17;
 pub(crate) const MAX_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 const MAGIC: [u8; 8] = *b"NVREP\0\0\x01";
 const VERSION: u16 = 1;
+
+pub(crate) fn field<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+    value
+        .as_map()?
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == Some(name)).then_some(value))
+}
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct EditorMetadata {

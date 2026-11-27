@@ -1,6 +1,8 @@
+mod export;
 mod player;
 mod protocol;
 mod recorder;
+mod renderer;
 mod rpc;
 
 use std::io;

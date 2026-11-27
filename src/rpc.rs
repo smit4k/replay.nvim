@@ -8,7 +8,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task;
 
-use crate::player::Player;
+use crate::export;
+use crate::player::{EditorFrame, Player};
 use crate::protocol::{
     EditorMetadata, PushEvent, ReplayInfo, SeekResult, Snapshot, invalid_data, pack,
 };
@@ -29,46 +30,6 @@ enum Reply {
     Info(ReplayInfo),
     State(SeekResult),
     Frame(EditorFrame),
-}
-
-#[derive(Serialize)]
-struct EditorFrame {
-    lines: Vec<String>,
-    row: u64,
-    col: u64,
-    topline: Option<u64>,
-}
-
-impl From<Snapshot> for EditorFrame {
-    fn from(mut snapshot: Snapshot) -> Self {
-        let cursor = snapshot
-            .active_window
-            .and_then(|id| snapshot.cursors.get(&id));
-        let topline = snapshot.active_window.and_then(|id| {
-            let windows = field(snapshot.layout.as_ref()?, "windows")?.as_array()?;
-            let window = windows
-                .iter()
-                .find(|window| field(window, "win").and_then(Value::as_u64) == Some(id))?;
-            field(window, "topline")?.as_u64()
-        });
-        let lines = snapshot
-            .active_buffer
-            .and_then(|id| snapshot.buffers.remove(&id))
-            .map_or_else(Vec::new, |buffer| buffer.lines);
-        Self {
-            lines,
-            row: cursor.map_or(1, |cursor| cursor.row),
-            col: cursor.map_or(0, |cursor| cursor.col),
-            topline,
-        }
-    }
-}
-
-fn field<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
-    value
-        .as_map()?
-        .iter()
-        .find_map(|(key, value)| (key.as_str() == Some(name)).then_some(value))
 }
 
 pub(crate) async fn serve(
@@ -202,10 +163,22 @@ impl Session {
                     Ok(Reply::State(state))
                 }
             }
+            "replay_render" if params.len() == 2 => {
+                if self.recording.is_some() {
+                    return Err(io::Error::other("stop recording before exporting a replay"));
+                }
+                let mut params = params.into_iter();
+                let input = PathBuf::from(required::<String>(params.next())?);
+                let output = PathBuf::from(required::<String>(params.next())?);
+                task::spawn_blocking(move || export::render(&Player::open(&input)?, &output))
+                    .await
+                    .map_err(io::Error::other)??;
+                Ok(Reply::Empty)
+            }
             "stop_recording" | "record_stop" | "push_event" | "record_event" | "open_replay"
-            | "replay_open" | "seek_to" | "replay_seek" => Err(invalid_data(format!(
-                "invalid parameter count for {method}"
-            ))),
+            | "replay_open" | "seek_to" | "replay_seek" | "replay_render" => Err(invalid_data(
+                format!("invalid parameter count for {method}"),
+            )),
             _ => Err(invalid_data(format!("unknown RPC method {method}"))),
         }
     }
@@ -296,6 +269,8 @@ impl Packets {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::field;
+
     use super::*;
 
     #[tokio::test]

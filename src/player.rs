@@ -3,12 +3,51 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use memmap2::Mmap;
+use rmpv::Value;
+use serde::Serialize;
 
 use crate::protocol::{
     CHUNK_HEADER_SIZE, ChunkHeader, EditorMetadata, HEADER_SIZE, Header, ReplayInfo, SeekEntry,
-    SeekResult, TimedEvent, invalid_data, unpack,
+    SeekResult, Snapshot, TimedEvent, field, invalid_data, unpack,
 };
 use crate::recorder::Shadow;
+
+#[derive(PartialEq, Serialize)]
+pub(crate) struct EditorFrame {
+    pub lines: Vec<String>,
+    pub row: u64,
+    pub col: u64,
+    pub topline: Option<u64>,
+    #[serde(skip)]
+    pub filetype: Option<String>,
+}
+
+impl From<Snapshot> for EditorFrame {
+    fn from(mut snapshot: Snapshot) -> Self {
+        let cursor = snapshot
+            .active_window
+            .and_then(|id| snapshot.cursors.get(&id));
+        let topline = snapshot.active_window.and_then(|id| {
+            let windows = field(snapshot.layout.as_ref()?, "windows")?.as_array()?;
+            let window = windows
+                .iter()
+                .find(|window| field(window, "win").and_then(Value::as_u64) == Some(id))?;
+            field(window, "topline")?.as_u64()
+        });
+        let buffer = snapshot
+            .active_buffer
+            .and_then(|id| snapshot.buffers.remove(&id));
+        let (lines, filetype) =
+            buffer.map_or_else(Default::default, |buf| (buf.lines, buf.filetype));
+        Self {
+            lines,
+            row: cursor.map_or(1, |cursor| cursor.row),
+            col: cursor.map_or(0, |cursor| cursor.col),
+            topline,
+            filetype,
+        }
+    }
+}
 
 pub(crate) struct Player {
     file: Mmap,
