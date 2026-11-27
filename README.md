@@ -1,15 +1,5 @@
 # replay.nvim
 
-hello everyone
-this is neovim REPLAY!!!
-
-Wow.
-
-It works?
-Hehe
-
-Record a Neovim session to a `.nvimreplay` file and export it as a video.
-
 ## Install with lazy.nvim
 
 Use Neovim 0.10 or later and a Rust toolchain to build the sidecar. For video export, install FFmpeg with `libx264` for MP4 or `ffv1` for MKV, and make sure `nvim` and `ffmpeg` are on your `PATH`.
