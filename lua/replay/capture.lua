@@ -12,6 +12,7 @@ local key_names = {
   CR = "Enter",
   BS = "Backspace",
   Del = "Delete",
+  Space = "␣",
   lt = "<",
   Up = "↑",
   Down = "↓",

@@ -11,7 +11,7 @@ describe("replay keystrokes", function()
       end
     end)
 
-    vim.api.nvim_feedkeys(vim.keycode("<F5><C-L><D-Right><M-Up><Down><Left>:<CR>"), "xt", false)
+    vim.api.nvim_feedkeys(vim.keycode("<F5><C-L><D-Right><M-Up><Down><Left><Space>:<CR>"), "xt", false)
     vim.defer_fn(function()
       vim.api.nvim_input("hidden<CR>")
     end, 10)
@@ -30,6 +30,7 @@ describe("replay keystrokes", function()
       mac and "⌥↑" or "Alt+↑",
       "↓",
       "←",
+      "␣",
       ":",
       "Enter",
     }, keys)

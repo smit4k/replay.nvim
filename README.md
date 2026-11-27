@@ -34,7 +34,7 @@ The renderer prefers an installed monospace Nerd Font. Set `opts = { render = { 
 
 New recordings from Neovim's terminal UI capture the visible screen, including Blink completion menus and inline suggestions when they appear. Live screen capture needs Neovim's local RPC socket. Earlier recordings can still be exported using their saved editor state.
 
-New recordings show keystrokes in the bottom-right corner of the exported video. Rapid presses share one line, such as `d i w`. Arrow keys use `← ↑ ↓ →`, and macOS modifiers use `⌘`, `⌥`, and `⌃`. The box shows up to eight recent presses and clears after one second of inactivity. Keystroke capture pauses in embedded terminals and masked prompts.
+New recordings show keystrokes in the bottom-right corner of the exported video. Rapid presses share one line, such as `d i w`. Space uses `␣`, arrow keys use `← ↑ ↓ →`, and macOS modifiers use `⌘`, `⌥`, and `⌃`. The box shows up to eight recent presses and clears after one second of inactivity. Keystroke capture pauses in embedded terminals and masked prompts.
 
 ## Development
 
