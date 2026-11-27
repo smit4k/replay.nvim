@@ -1,6 +1,6 @@
 # replay.nvim
 
-Record a Neovim session to a `.nvimreplay` file, scrub through it in the editor, or export it as a video.
+Record a Neovim session to a `.nvimreplay` file and export it as a video.
 
 ## Install with lazy.nvim
 
@@ -10,7 +10,7 @@ Use Neovim 0.10 or later and a Rust toolchain to build the sidecar. For video ex
 return {
   "smit4k/replay.nvim",
   main = "replay",
-  cmd = { "ReplayStart", "ReplayStop", "ReplayOpen", "ReplayRender" },
+  cmd = { "ReplayStart", "ReplayStop", "ReplayRender" },
   build = "cargo build --release --locked --target-dir target",
   opts = {},
 }
@@ -18,15 +18,18 @@ return {
 
 For a local checkout, replace `"smit4k/replay.nvim"` with `dir = "/path/to/replay.nvim"`, set `name = "replay.nvim"`, and run `:Lazy build replay.nvim`.
 
-## Record and replay
+## Record and export
 
 ```vim
-:ReplayStart demo.nvimreplay
+:ReplayStart session.nvimreplay
 :ReplayStop
-:ReplayOpen demo.nvimreplay
-:ReplayRender demo.mp4
+:ReplayRender session.nvimreplay session.mp4
 ```
 
-In the replay tab, use **Left** and **Right** to step through frames, **Space** to play or pause, and **1–5** to change speed.
+In the same Neovim session, `:ReplayRender session.mp4` exports the most recently completed recording.
 
-Video export shows the active buffer, cursor, and scroll position at 1080p and 60 fps. Use an `.mp4` or `.mkv` filename and wait for the save notification before closing Neovim. Existing output files are protected.
+Video export defaults to 3840 × 2160 at 60 fps. Use `.mp4` for H.264 or `.mkv` for lossless FFV1. Wait for the save notification before closing Neovim. Existing output files are protected.
+
+The renderer prefers an installed monospace Nerd Font. Set `opts = { render = { font = "JetBrainsMono Nerd Font Mono" } }` to pick an installed family, or use an absolute path to a font file. Set `render.scale = 1` for 1920 × 1080 output.
+
+New recordings from Neovim's terminal UI capture the visible screen, including Blink completion menus and inline suggestions when they appear. Live screen capture needs Neovim's local RPC socket. Earlier recordings can still be exported using their saved editor state.

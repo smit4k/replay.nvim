@@ -1,0 +1,10 @@
+describe("replay commands", function()
+  it("registers recording and video export", function()
+    vim.cmd("runtime plugin/replay.lua")
+
+    assert.equals(2, vim.fn.exists(":ReplayStart"))
+    assert.equals(2, vim.fn.exists(":ReplayStop"))
+    assert.equals(2, vim.fn.exists(":ReplayRender"))
+    assert.equals(0, vim.fn.exists(":ReplayOpen"))
+  end)
+end)

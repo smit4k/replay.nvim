@@ -469,7 +469,7 @@ impl Shadow {
             }
             Event::ModeChanged { new_mode, .. } => self.mode = Some(new_mode),
             Event::WinLayout { layout } => self.layout = layout,
-            Event::KeyPress { .. } => {}
+            Event::KeyPress { .. } | Event::UiRedraw { .. } | Event::RecordingEnd => {}
         }
         Ok(())
     }

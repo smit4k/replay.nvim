@@ -1,13 +1,13 @@
 local ipc = require("replay.ipc")
 local capture = require("replay.capture")
-local scrubber = require("replay.scrubber")
+local screen = require("replay.screen")
 local M = {}
 local executable = "replay-sidecar" .. (vim.fn.has("win32") == 1 and ".exe" or "")
 local sidecar = vim.api.nvim_get_runtime_file("target/release/" .. executable, false)[1] or executable
 local recording
 local rendering
 local last_path
-local open_path
+local render = {}
 
 local function report(err)
   local message = type(err) == "string" and err or vim.inspect(err)
@@ -16,6 +16,7 @@ end
 
 local function connect()
   local ok, err = ipc.start(sidecar, function(reason)
+    screen.stop()
     capture.stop(true)
     recording = nil
     report(reason)
@@ -38,11 +39,32 @@ local function absolute(path)
   return vim.fn.fnamemodify(path, ":p")
 end
 
+local function render_vimrc()
+  local argv = vim.v.argv
+  for i, arg in ipairs(argv) do
+    if arg == "--" or arg == "-l" then
+      break
+    end
+    if arg == "--clean" then
+      return
+    end
+    if arg == "-u" then
+      local path = argv[i + 1]
+      if path == "NONE" then
+        return
+      end
+      return path == "NORC" and path or absolute(path)
+    end
+  end
+  return vim.env.MYVIMRC
+end
+
 function M.setup(opts)
   opts = opts or {}
   if opts.sidecar then
     sidecar = opts.sidecar
   end
+  render = opts.render or render
 end
 
 function M.start(path)
@@ -65,6 +87,7 @@ function M.start(path)
   local queued = request("record_start", { path, metadata }, function(err)
     if err then
       if recording == current then
+        screen.stop()
         capture.stop(true)
         recording = nil
       end
@@ -72,12 +95,14 @@ function M.start(path)
     end
   end)
   if queued then
-    capture.start(function(kind, fields)
+    current.emit = function(kind, fields)
       fields.kind = kind
       -- Timestamp at capture so sidecar startup and IPC buffering preserve the timing.
       fields.timestamp_ns = vim.uv.hrtime() - started_at
       ipc.notify("record_event", { fields })
-    end)
+    end
+    capture.start(current.emit)
+    screen.start(current.emit)
   end
 end
 
@@ -87,7 +112,9 @@ function M.stop()
   end
   local current = recording
   current.stopping = true
+  screen.stop()
   capture.stop()
+  current.emit("recording_end", {})
   request("record_stop", {}, function(err)
     if err then
       report(err)
@@ -100,43 +127,31 @@ function M.stop()
   end)
 end
 
-function M.open(path)
-  if not connect() then
+function M.render(input_or_output, output, ...)
+  if not input_or_output or select("#", ...) > 0 then
+    report("Usage: :ReplayRender [recording.nvimreplay] <video.mp4 or video.mkv>")
     return
   end
-  path = absolute(path)
-  request("replay_open", { path }, function(err, info)
-    if err then
-      report(err)
-      return
-    end
-    local ok, open_err = scrubber.open(info, function(position, callback)
-      request("replay_seek", { position }, function(seek_err, frame)
-        callback(seek_err and (type(seek_err) == "string" and seek_err or vim.inspect(seek_err)), frame)
-      end)
-    end)
-    if ok then
-      open_path = path
-    else
-      report(open_err)
-    end
-  end)
-end
-
-function M.render(path)
   if recording or rendering then
     report("Finish the current recording or export before exporting a replay")
     return
   end
-  local input = open_path or last_path
+  local input = output and absolute(input_or_output) or last_path
   if not input then
-    report("Open or finish recording a replay before rendering")
+    report("Specify a recording with :ReplayRender <recording.nvimreplay> <video.mp4 or video.mkv>")
     return
   end
   if connect() then
-    local output = absolute(path)
+    output = absolute(output or input_or_output)
     rendering = true
-    request("replay_render", { input, output }, function(err)
+    local startup = {
+      executable = vim.v.progpath,
+      vimrc = render_vimrc(),
+      cwd = vim.fn.getcwd(),
+      font = render.font,
+      scale = render.scale,
+    }
+    request("replay_render", { input, output, startup }, function(err)
       rendering = false
       if err then
         report(err)

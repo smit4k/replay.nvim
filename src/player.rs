@@ -7,8 +7,8 @@ use rmpv::Value;
 use serde::Serialize;
 
 use crate::protocol::{
-    CHUNK_HEADER_SIZE, ChunkHeader, EditorMetadata, HEADER_SIZE, Header, ReplayInfo, SeekEntry,
-    SeekResult, Snapshot, TimedEvent, field, invalid_data, unpack,
+    CHUNK_HEADER_SIZE, ChunkHeader, EditorMetadata, Event, HEADER_SIZE, Header, ReplayInfo,
+    SeekEntry, SeekResult, Snapshot, TimedEvent, field, invalid_data, unpack,
 };
 use crate::recorder::Shadow;
 
@@ -20,6 +20,10 @@ pub(crate) struct EditorFrame {
     pub topline: Option<u64>,
     #[serde(skip)]
     pub filetype: Option<String>,
+    #[serde(skip)]
+    pub path: Option<String>,
+    #[serde(skip)]
+    pub buffer_id: Option<u64>,
 }
 
 impl From<Snapshot> for EditorFrame {
@@ -37,14 +41,16 @@ impl From<Snapshot> for EditorFrame {
         let buffer = snapshot
             .active_buffer
             .and_then(|id| snapshot.buffers.remove(&id));
-        let (lines, filetype) =
-            buffer.map_or_else(Default::default, |buf| (buf.lines, buf.filetype));
+        let (lines, filetype, path) =
+            buffer.map_or_else(Default::default, |buf| (buf.lines, buf.filetype, buf.path));
         Self {
             lines,
             row: cursor.map_or(1, |cursor| cursor.row),
             col: cursor.map_or(0, |cursor| cursor.col),
             topline,
             filetype,
+            path,
+            buffer_id: snapshot.active_buffer,
         }
     }
 }
@@ -124,6 +130,38 @@ impl Player {
             metadata: self.metadata.clone(),
             keyframes: self.index.iter().map(|entry| entry.0).collect(),
         }
+    }
+
+    /// Visual deltas are applied from the first redraw in order, independently of editor keyframes.
+    pub fn visual_events(&self) -> impl Iterator<Item = io::Result<(u64, Value)>> + '_ {
+        let mut chunks = &self.file[self.index[0].1 as usize..self.footer_offset];
+        let mut events = Vec::<TimedEvent>::new().into_iter();
+        std::iter::from_fn(move || {
+            loop {
+                for timed in events.by_ref() {
+                    if let Event::UiRedraw { events } = timed.event {
+                        return Some(Ok((timed.timestamp_ns, events)));
+                    }
+                }
+                if chunks.is_empty() {
+                    return None;
+                }
+                let next = take_chunk(&mut chunks).and_then(|(header, frame)| {
+                    if header.is_keyframe {
+                        Ok(Vec::new())
+                    } else {
+                        unpack(&decompress(&header, frame)?)
+                    }
+                });
+                match next {
+                    Ok(chunk) => events = chunk.into_iter(),
+                    Err(error) => {
+                        chunks = &[];
+                        return Some(Err(error));
+                    }
+                }
+            }
+        })
     }
 
     pub fn seek(&self, timestamp_ns: u64) -> io::Result<SeekResult> {
@@ -300,6 +338,58 @@ mod tests {
             .unwrap();
         assert!(Player::open(&path).is_err());
         assert_eq!(player.seek(u64::MAX).unwrap(), end);
+    }
+
+    #[tokio::test]
+    async fn streams_visual_deltas_across_semantic_keyframes() {
+        use crate::renderer::headless_nvim::Grid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("screen.nvimreplay");
+        let recording =
+            Recording::start(path.clone(), EditorMetadata::default(), Snapshot::default())
+                .await
+                .unwrap();
+        let first = rmpv::ext::to_value([("grid_resize", (1, 2, 1))]).unwrap();
+        let deltas = [
+            (1, first),
+            (
+                10_000_000_000,
+                rmpv::ext::to_value([("grid_line", (1, 0, 0, [("A", 0)]))]).unwrap(),
+            ),
+            (
+                10_100_000_000,
+                rmpv::ext::to_value([("grid_line", (1, 0, 1, [("B", 0)]))]).unwrap(),
+            ),
+        ];
+        for (time, mut events) in deltas {
+            let Value::Array(batch) = &mut events else {
+                unreachable!()
+            };
+            batch.push(Value::Array(vec!["flush".into()]));
+            recording
+                .push(
+                    PushEvent {
+                        timestamp_ns: Some(time),
+                        event: Event::UiRedraw { events },
+                    },
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        recording.stop().await.unwrap();
+
+        let player = Player::open(&path).unwrap();
+        assert_eq!(player.info().keyframes, [0, 10_000_000_000]);
+        let mut grid = Grid::default();
+        for event in player.visual_events() {
+            grid.apply_redraw(&event.unwrap().1).unwrap();
+            assert!(grid.complete());
+        }
+        let screen: String = grid.cells().iter().map(|cell| cell.text.as_ref()).collect();
+        assert_eq!(screen, "AB");
+        assert!(player.seek(u64::MAX).unwrap().snapshot.buffers.is_empty());
     }
 
     #[tokio::test]

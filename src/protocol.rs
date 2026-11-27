@@ -7,12 +7,12 @@
 //! - push_event(event) -> nil; also accepted as a notification
 //! - open_replay(path) -> ReplayInfo
 //! - seek_to(timestamp_ns) -> SeekResult
-//! - replay_render(input_path, output_path) -> nil
+//! - replay_render(input_path, output_path, render_options?) -> nil
 //!
-//! The Lua client also uses record_start, record_stop, record_event,
-//! replay_open, and replay_seek. Its events use "kind", "buf", and "win"
-//! as aliases for "type", "buffer_id", and "window_id". replay_seek
-//! returns the active buffer's lines, cursor position, and topline.
+//! The Lua client also uses record_start, record_stop, and record_event.
+//! Its events use "kind", "buf", and "win" as aliases for "type", "buffer_id",
+//! and "window_id". The replay_open and replay_seek aliases are also available.
+//! replay_seek returns the active buffer's lines, cursor position, and topline.
 //!
 //! Structs are string-keyed maps, including decimal buffer and window IDs
 //! in snapshots. Event maps use the "type" field with the
@@ -180,6 +180,10 @@ pub(crate) enum Event {
     KeyPress {
         key: String,
     },
+    UiRedraw {
+        events: Value,
+    },
+    RecordingEnd,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]

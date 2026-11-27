@@ -163,16 +163,19 @@ impl Session {
                     Ok(Reply::State(state))
                 }
             }
-            "replay_render" if params.len() == 2 => {
+            "replay_render" if (2..=3).contains(&params.len()) => {
                 if self.recording.is_some() {
                     return Err(io::Error::other("stop recording before exporting a replay"));
                 }
                 let mut params = params.into_iter();
                 let input = PathBuf::from(required::<String>(params.next())?);
                 let output = PathBuf::from(required::<String>(params.next())?);
-                task::spawn_blocking(move || export::render(&Player::open(&input)?, &output))
-                    .await
-                    .map_err(io::Error::other)??;
+                let options: export::RenderOptions = optional(params.next())?;
+                task::spawn_blocking(move || {
+                    export::render(&Player::open(&input)?, &output, &options)
+                })
+                .await
+                .map_err(io::Error::other)??;
                 Ok(Reply::Empty)
             }
             "stop_recording" | "record_stop" | "push_event" | "record_event" | "open_replay"

@@ -60,7 +60,7 @@ impl VideoEncoder {
                     "-pix_fmt",
                     pixel_format,
                     "-crf",
-                    "18",
+                    "12",
                     "-movflags",
                     "+faststart",
                     "-f",

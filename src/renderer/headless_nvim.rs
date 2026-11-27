@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rmpv::Value;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct Cell {
@@ -59,11 +61,32 @@ pub struct Grid {
     cursor: Option<(usize, usize)>,
     cursor_styles: Vec<CursorStyle>,
     mode: usize,
+    redraw_pending: bool,
 }
 
 impl Grid {
     pub fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    pub fn complete(&self) -> bool {
+        !self.redraw_pending && !self.cells.is_empty()
+    }
+
+    pub fn apply_redraw(&mut self, events: &Value) -> io::Result<()> {
+        let invalid = || invalid_event("redraw");
+        for event in events.as_array().ok_or_else(invalid)? {
+            let (name, batches) = event
+                .as_array()
+                .and_then(|event| event.split_first())
+                .ok_or_else(invalid)?;
+            let name = name.as_str().ok_or_else(invalid)?;
+            self.redraw_pending = name != "flush";
+            for batch in batches {
+                self.apply(name, batch.as_array().ok_or_else(invalid)?)?;
+            }
+        }
+        Ok(())
     }
 
     /// Cells in row-major order. An empty string marks a wide glyph's second cell.
@@ -97,7 +120,7 @@ impl Grid {
     fn resize(&mut self, width: usize, height: usize) -> io::Result<()> {
         let len = width
             .checked_mul(height)
-            .filter(|&len| len != 0)
+            .filter(|&len| len != 0 && len <= 512 * 512)
             .ok_or_else(|| invalid_event("grid_resize"))?;
         let mut cells = Vec::new();
         cells.try_reserve_exact(len).map_err(io::Error::other)?;
@@ -267,20 +290,37 @@ pub struct HeadlessNvim {
     output: BufReader<ChildStdout>,
     next_id: u32,
     grid: Grid,
-    redraw_pending: bool,
+}
+
+#[derive(Default, Deserialize)]
+pub struct NvimStartup {
+    pub executable: Option<PathBuf>,
+    pub vimrc: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
 }
 
 impl HeadlessNvim {
-    /// Launch Neovim with a clean startup and attach a single RGB line grid.
-    pub fn spawn(columns: u32, rows: u32) -> io::Result<Self> {
+    /// Launch Neovim and attach a single RGB line grid.
+    pub fn spawn(columns: u32, rows: u32, startup: &NvimStartup) -> io::Result<Self> {
         if columns == 0 || rows == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "empty Neovim grid",
             ));
         }
-        let mut child = Command::new("nvim")
-            .args(["--embed", "-u", "NONE", "-i", "NONE", "-n"])
+        let mut command = Command::new(startup.executable.as_deref().unwrap_or(Path::new("nvim")));
+        command
+            .args(["--embed", "-i", "NONE", "-n"])
+            .args([
+                "--cmd",
+                "let g:replay_rendering = v:true | set noexrc nomodeline termguicolors",
+            ])
+            .arg("-u")
+            .arg(startup.vimrc.as_deref().unwrap_or(Path::new("NONE")));
+        if let Some(cwd) = &startup.cwd {
+            command.current_dir(cwd);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -293,7 +333,6 @@ impl HeadlessNvim {
             output: BufReader::new(output),
             next_id: 0,
             grid: Grid::default(),
-            redraw_pending: false,
         };
         nvim.request(
             "nvim_ui_attach",
@@ -303,6 +342,19 @@ impl HeadlessNvim {
                 HashMap::from([("ext_linegrid", true), ("rgb", true)]),
             ),
         )?;
+        if startup.vimrc.is_some() {
+            // Some startup scripts process RPC while waiting for a plugin.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while nvim.request("nvim_eval", &("v:vim_did_enter",))?.as_u64() != Some(1) {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Neovim configuration did not finish starting",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         nvim.redraw()?;
         Ok(nvim)
     }
@@ -329,7 +381,7 @@ impl HeadlessNvim {
                 }
                 [kind, event, events] if kind.as_u64() == Some(2) => {
                     if event.as_str() == Some("redraw") {
-                        self.apply_redraw(events)?;
+                        self.grid.apply_redraw(events)?;
                     }
                 }
                 [kind, request_id, _, _] if kind.as_u64() == Some(0) => {
@@ -352,7 +404,7 @@ impl HeadlessNvim {
     /// the pending grid events before its RPC response.
     pub fn redraw(&mut self) -> io::Result<&Grid> {
         self.request("nvim_command", &("redraw",))?;
-        if self.redraw_pending || self.grid.cells.is_empty() {
+        if !self.grid.complete() {
             return Err(invalid_event("redraw without a complete grid"));
         }
         Ok(&self.grid)
@@ -365,23 +417,6 @@ impl HeadlessNvim {
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Neovim stdin closed"))?
             .write_all(&bytes)
-    }
-
-    fn apply_redraw(&mut self, events: &Value) -> io::Result<()> {
-        let invalid = || invalid_event("redraw");
-        for event in events.as_array().ok_or_else(invalid)? {
-            let (name, batches) = event
-                .as_array()
-                .and_then(|event| event.split_first())
-                .ok_or_else(invalid)?;
-            let name = name.as_str().ok_or_else(invalid)?;
-            self.redraw_pending = name != "flush";
-            for batch in batches {
-                self.grid
-                    .apply(name, batch.as_array().ok_or_else(invalid)?)?;
-            }
-        }
-        Ok(())
     }
 }
 

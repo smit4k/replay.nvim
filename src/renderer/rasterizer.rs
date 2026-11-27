@@ -24,23 +24,27 @@ pub struct RgbaFrame<'a> {
 pub struct Rasterizer {
     fonts: FontSystem,
     family: String,
+    icon_family: Option<String>,
     buffer: Buffer,
     swash: SwashCache,
     glyphs: HashMap<(Arc<str>, bool, bool), Vec<PhysicalGlyph>>,
     baseline: f32,
     cell_width: u32,
     cell_height: u32,
+    canvas: Option<(u32, u32)>,
+    origin: (f32, f32),
     pixmap: Pixmap,
     cursor: Option<(f32, f32)>,
 }
 
 impl Rasterizer {
-    /// Use a TrueType font file or a system monospace font. Sizes are in pixels.
+    /// Use an installed family or font file. Sizes are in pixels.
     pub fn new(
         cell_width: u32,
         cell_height: u32,
         font_size: f32,
-        font_path: Option<&Path>,
+        font: Option<&Path>,
+        canvas: Option<(u32, u32)>,
     ) -> io::Result<Self> {
         if cell_width == 0 || cell_height == 0 || !font_size.is_finite() || font_size <= 0.0 {
             return Err(io::Error::new(
@@ -50,49 +54,80 @@ impl Rasterizer {
         }
         let mut fonts = FontSystem::new();
         let db = fonts.db_mut();
-        let family = if let Some(path) = font_path {
-            let data = std::fs::read(path)?;
-            let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(data)));
-            ids.first().and_then(|id| db.face(*id))
-        } else {
-            ["Menlo", "DejaVu Sans Mono", "Consolas", "Noto Sans Mono"]
-                .into_iter()
-                .find_map(|name| {
-                    db.query(&fontdb::Query {
-                        families: &[Family::Name(name)],
-                        ..fontdb::Query::default()
-                    })
+        let font_from_file = match font {
+            Some(path) if path.is_file() => {
+                let data = std::fs::read(path)?;
+                db.load_font_source(fontdb::Source::Binary(Arc::new(data)))
+                    .into_iter()
+                    .find_map(|id| db.face(id)?.families.first().map(|(name, _)| name.clone()))
+            }
+            _ => None,
+        };
+        let installed = |name: &str| {
+            db.faces()
+                .flat_map(|face| &face.families)
+                .find(|(family, _)| family.eq_ignore_ascii_case(name))
+                .map(|(family, _)| family.clone())
+        };
+        let nerd = installed("JetBrainsMono Nerd Font Mono").or_else(|| {
+            db.faces()
+                .flat_map(|face| &face.families)
+                .map(|(family, _)| family)
+                .filter(|family| {
+                    family.ends_with(" Nerd Font Mono") && !family.starts_with("Symbols ")
                 })
-                .and_then(|id| db.face(id))
-                .or_else(|| db.faces().find(|face| face.monospaced))
-        }
-        .and_then(|face| face.families.first())
-        .map(|(name, _)| name.clone())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no usable renderer font found"))?;
+                .min()
+                .cloned()
+        });
+        let family = match font {
+            Some(font) => font_from_file
+                .or_else(|| font.to_str().and_then(installed))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("renderer font not found: {}", font.display()),
+                    )
+                })?,
+            None => nerd
+                .clone()
+                .or_else(|| {
+                    ["Menlo", "DejaVu Sans Mono", "Consolas", "Noto Sans Mono"]
+                        .into_iter()
+                        .find_map(installed)
+                })
+                .or_else(|| {
+                    db.faces()
+                        .find(|face| face.monospaced)?
+                        .families
+                        .first()
+                        .map(|(family, _)| family.clone())
+                })
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "no usable renderer font found")
+                })?,
+        };
+        let icon_family = if family.contains("Nerd Font") {
+            None
+        } else {
+            nerd.or_else(|| installed("Symbols Nerd Font Mono"))
+        };
 
         let mut buffer = Buffer::new(&mut fonts, Metrics::new(font_size, cell_height as f32));
-        let mut shaping = buffer.borrow_with(&mut fonts);
-        shaping.set_wrap(Wrap::None);
-        shaping.set_text(
-            "M",
-            &Attrs::new().family(Family::Name(&family)),
-            Shaping::Advanced,
-            None,
-        );
-        let baseline = shaping
-            .layout_runs()
-            .next()
-            .map_or(0.0, |line| line.line_y.round());
+        buffer.borrow_with(&mut fonts).set_wrap(Wrap::None);
+        let baseline = font_baseline(&mut buffer, &mut fonts, &family, canvas.map(|_| cell_width));
 
         Ok(Self {
             fonts,
             family,
+            icon_family,
             buffer,
             swash: SwashCache::new(),
             glyphs: HashMap::new(),
             baseline,
             cell_width,
             cell_height,
+            canvas,
+            origin: (0.0, 0.0),
             pixmap: new_pixmap(1, 1)?,
             cursor: None,
         })
@@ -101,14 +136,54 @@ impl Rasterizer {
     /// Render a complete grid. Use elapsed video time to advance cursor motion.
     pub fn render(&mut self, grid: &Grid, elapsed: Duration) -> io::Result<RgbaFrame<'_>> {
         let (columns, rows) = grid.dimensions();
+        if columns == 0 || rows == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty render grid",
+            ));
+        }
         let size = |cells, pixels| {
             u32::try_from(cells)
                 .ok()
                 .and_then(|cells| cells.checked_mul(pixels))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame size overflow"))
         };
-        let width = size(columns, self.cell_width)?;
-        let height = size(rows, self.cell_height)?;
+        let (width, height) = if let Some((width, height)) = self.canvas {
+            let cell_width = (width / columns as u32).min(height / rows as u32 / 2);
+            if cell_width == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "render grid exceeds the video canvas",
+                ));
+            }
+            let cell_height = cell_width * 2;
+            if (cell_width, cell_height) != (self.cell_width, self.cell_height) {
+                let font_size =
+                    self.buffer.metrics().font_size * cell_height as f32 / self.cell_height as f32;
+                self.cell_width = cell_width;
+                self.cell_height = cell_height;
+                self.buffer
+                    .set_metrics(Metrics::new(font_size, cell_height as f32));
+                self.baseline = font_baseline(
+                    &mut self.buffer,
+                    &mut self.fonts,
+                    &self.family,
+                    Some(cell_width),
+                );
+                self.glyphs.clear();
+                self.cursor = None;
+            }
+            self.origin = (
+                ((width - columns as u32 * cell_width) / 2) as f32,
+                ((height - rows as u32 * cell_height) / 2) as f32,
+            );
+            (width, height)
+        } else {
+            (
+                size(columns, self.cell_width)?,
+                size(rows, self.cell_height)?,
+            )
+        };
         if self.pixmap.width() != width || self.pixmap.height() != height {
             self.pixmap = new_pixmap(width, height)?;
             self.cursor = None;
@@ -146,8 +221,8 @@ impl Rasterizer {
 
     fn cell_bounds(&self, col: f32, row: f32, span: u32) -> Option<Rect> {
         Rect::from_xywh(
-            col * self.cell_width as f32,
-            row * self.cell_height as f32,
+            self.origin.0 + col * self.cell_width as f32,
+            self.origin.1 + row * self.cell_height as f32,
             (self.cell_width * span) as f32,
             self.cell_height as f32,
         )
@@ -160,8 +235,16 @@ impl Rasterizer {
                 .glyphs
                 .entry((cell.text.clone(), highlight.bold, highlight.italic))
                 .or_insert_with(|| {
+                    let icon = cell.text.chars().next().is_some_and(|ch| {
+                        matches!(ch as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
+                    });
+                    let family = if icon {
+                        self.icon_family.as_deref().unwrap_or(&self.family)
+                    } else {
+                        &self.family
+                    };
                     let attrs = Attrs::new()
-                        .family(Family::Name(&self.family))
+                        .family(Family::Name(family))
                         .weight(if highlight.bold {
                             Weight::BOLD
                         } else {
@@ -294,6 +377,33 @@ impl Rasterizer {
             }
         }
     }
+}
+
+fn font_baseline(
+    buffer: &mut Buffer,
+    fonts: &mut FontSystem,
+    family: &str,
+    cell_width: Option<u32>,
+) -> f32 {
+    let mut shaping = buffer.borrow_with(fonts);
+    shaping.set_text(
+        "M",
+        &Attrs::new().family(Family::Name(family)),
+        Shaping::Advanced,
+        None,
+    );
+    if let Some(width) = cell_width
+        && let Some(advance) = shaping.layout_runs().next().map(|line| line.line_w)
+        && advance > 0.0
+    {
+        let metrics = shaping.metrics();
+        let size = (metrics.font_size * width as f32 / advance).min(metrics.line_height);
+        shaping.set_metrics(Metrics::new(size, metrics.line_height));
+    }
+    shaping
+        .layout_runs()
+        .next()
+        .map_or(0.0, |line| line.line_y.round())
 }
 
 fn cell_span(grid: &Grid, columns: usize, i: usize) -> u32 {
