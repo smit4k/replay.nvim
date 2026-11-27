@@ -1,5 +1,13 @@
 # replay.nvim
 
+hello everyone
+this is neovim REPLAY!!!
+
+Wow.
+
+It works?
+Hehe
+
 Record a Neovim session to a `.nvimreplay` file and export it as a video.
 
 ## Install with lazy.nvim
@@ -11,7 +19,7 @@ return {
   "smit4k/replay.nvim",
   main = "replay",
   cmd = { "ReplayStart", "ReplayStop", "ReplayRender" },
-  build = "cargo build --release --locked --target-dir target",
+  build = "cargo build --release --locked --manifest-path renderer/Cargo.toml --target-dir renderer/target",
   opts = {},
 }
 ```
@@ -33,3 +41,7 @@ Video export defaults to 3840 × 2160 at 60 fps. Use `.mp4` for H.264 or `.mkv` 
 The renderer prefers an installed monospace Nerd Font. Set `opts = { render = { font = "JetBrainsMono Nerd Font Mono" } }` to pick an installed family, or use an absolute path to a font file. Set `render.scale = 1` for 1920 × 1080 output.
 
 New recordings from Neovim's terminal UI capture the visible screen, including Blink completion menus and inline suggestions when they appear. Live screen capture needs Neovim's local RPC socket. Earlier recordings can still be exported using their saved editor state.
+
+## Development
+
+From the repository root, run `cargo test --locked --manifest-path renderer/Cargo.toml` for Rust and `make test` for Lua.

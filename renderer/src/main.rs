@@ -9,7 +9,10 @@ use std::io;
 use std::path::PathBuf;
 
 #[tokio::main]
+/// wow! this works i guess hopefully?
+/// Maybe?
 async fn main() -> io::Result<()> {
+    eprintln!("Hey everyine!");
     let mut args = std::env::args_os().skip(1);
     match (args.next(), args.next(), args.next()) {
         (None, None, None) => run_stdio().await,

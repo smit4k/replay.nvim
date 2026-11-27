@@ -3,7 +3,7 @@ local capture = require("replay.capture")
 local screen = require("replay.screen")
 local M = {}
 local executable = "replay-sidecar" .. (vim.fn.has("win32") == 1 and ".exe" or "")
-local sidecar = vim.api.nvim_get_runtime_file("target/release/" .. executable, false)[1] or executable
+local sidecar = vim.api.nvim_get_runtime_file("renderer/target/release/" .. executable, false)[1] or executable
 local recording
 local rendering
 local last_path
