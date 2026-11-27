@@ -3,6 +3,7 @@ use std::{io, path::Path, time::Duration};
 use serde::Deserialize;
 
 use crate::player::{EditorFrame, Player};
+use crate::protocol::{Event, TimedEvent};
 use crate::renderer::{
     encoder::VideoEncoder,
     headless_nvim::{Grid, HeadlessNvim, NvimStartup},
@@ -14,6 +15,35 @@ const COLUMNS: u32 = 160;
 const ROWS: u32 = 45;
 const CELL_WIDTH: u32 = 12;
 const CELL_HEIGHT: u32 = 24;
+const KEY_IDLE_NS: u64 = 1_000_000_000;
+const MAX_SEQUENCE_KEYS: usize = 8;
+
+#[derive(Default)]
+struct KeySequence {
+    keys: Vec<String>,
+    label: String,
+    last_press_ns: Option<u64>,
+}
+
+impl KeySequence {
+    fn push(&mut self, timestamp_ns: u64, key: String) {
+        if self.label_at(timestamp_ns).is_none() {
+            self.keys.clear();
+        }
+        if self.keys.len() == MAX_SEQUENCE_KEYS {
+            self.keys.remove(0);
+        }
+        self.keys.push(key);
+        self.label = self.keys.join(" ");
+        self.last_press_ns = Some(timestamp_ns);
+    }
+
+    fn label_at(&self, timestamp_ns: u64) -> Option<&str> {
+        self.last_press_ns
+            .filter(|&last| timestamp_ns - last < KEY_IDLE_NS)
+            .map(|_| self.label.as_str())
+    }
+}
 
 #[derive(Default, Deserialize)]
 pub(crate) struct RenderOptions {
@@ -87,84 +117,99 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
     let font = options.font.as_deref().map(Path::new);
     let mut rasterizer =
         Rasterizer::new(CELL_WIDTH, CELL_HEIGHT, 19.0, font, Some((width, height)))?;
-    let mut updates = player.visual_events();
-    let first = updates.next().transpose()?;
-    let mut encoder = VideoEncoder::spawn(output, width, height, FPS)?;
-    let timestamps = frame_times(info.duration_ns);
-
-    if let Some((first_time, events)) = first {
-        let mut grid = Grid::default();
+    let first_redraw = player
+        .visual_events()
+        .find_map(|update| match update {
+            Ok(TimedEvent {
+                event: Event::UiRedraw { events },
+                ..
+            }) => Some(Ok(events)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .transpose()?;
+    let mut grid = Grid::default();
+    let mut skip_first_redraw = first_redraw.is_some();
+    let mut nvim = if let Some(events) = first_redraw {
+        // Use the first captured screen for the frames before the UI attached.
         grid.apply_redraw(&events)?;
-        let mut last_time = first_time;
-        let mut next = updates.next().transpose()?;
-        for timestamp in timestamps {
-            while next.as_ref().is_some_and(|(time, _)| *time <= timestamp) {
-                let Some((time, events)) = next.take() else {
-                    break;
-                };
-                if time < last_time {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "unordered visual events",
-                    ));
+        None
+    } else {
+        let mut nvim = HeadlessNvim::spawn(COLUMNS, ROWS, &options.startup)?;
+        let scheme = info.metadata.colorscheme.as_deref().unwrap_or_default();
+        nvim.request(
+            "nvim_exec_lua",
+            &(SETUP_EDITOR, (scheme, options.startup.vimrc.is_some())),
+        )?;
+        Some(nvim)
+    };
+
+    let mut encoder = VideoEncoder::spawn(output, width, height, FPS)?;
+    let mut updates = player.visual_events();
+    let mut next = updates.next().transpose()?;
+    let mut previous = None;
+    let mut keys = KeySequence::default();
+    for timestamp in frame_times(info.duration_ns) {
+        while let Some(update) = next.take_if(|update| update.timestamp_ns <= timestamp) {
+            match update.event {
+                Event::UiRedraw { events } => {
+                    if !std::mem::take(&mut skip_first_redraw) {
+                        grid.apply_redraw(&events)?;
+                    }
                 }
-                last_time = time;
-                grid.apply_redraw(&events)?;
-                next = updates.next().transpose()?;
+                Event::KeyPress { key } if !key.is_empty() => keys.push(update.timestamp_ns, key),
+                _ => {}
             }
-            if !grid.complete() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "incomplete captured screen",
-                ));
-            }
-            encoder.write_frame(rasterizer.render(&grid, Duration::from_secs(1) / FPS)?)?;
+            next = updates.next().transpose()?;
         }
-        if first_time > info.duration_ns || next.is_some() {
+        let grid = if let Some(nvim) = &mut nvim {
+            restore_editor(nvim, player, timestamp, &mut previous)?;
+            nvim.redraw()?
+        } else if grid.complete() {
+            &grid
+        } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "visual events exceed replay duration",
+                "incomplete captured screen",
             ));
-        }
-        return encoder.finish();
-    }
-
-    let mut nvim = HeadlessNvim::spawn(COLUMNS, ROWS, &options.startup)?;
-    let scheme = info.metadata.colorscheme.as_deref().unwrap_or_default();
-    nvim.request(
-        "nvim_exec_lua",
-        &(SETUP_EDITOR, (scheme, options.startup.vimrc.is_some())),
-    )?;
-
-    let mut previous: Option<EditorFrame> = None;
-    // shortcut: seeking each frame repeats decoding within a keyframe, stream deltas if long exports are too slow
-    for timestamp in timestamps {
-        let frame = EditorFrame::from(player.seek(timestamp)?.snapshot);
-        if previous.as_ref() != Some(&frame) {
-            let lines = previous
-                .as_ref()
-                .is_none_or(|prev| prev.buffer_id != frame.buffer_id || prev.lines != frame.lines)
-                .then_some(&frame.lines);
-            nvim.request(
-                "nvim_exec_lua",
-                &(
-                    "replay_apply_frame(...)",
-                    (
-                        frame.buffer_id,
-                        frame.path.as_deref().unwrap_or_default(),
-                        frame.filetype.as_deref().unwrap_or_default(),
-                        lines,
-                        frame.row,
-                        frame.col,
-                        frame.topline,
-                    ),
-                ),
-            )?;
-            previous = Some(frame);
-        }
-        encoder.write_frame(rasterizer.render(nvim.redraw()?, Duration::from_secs(1) / FPS)?)?;
+        };
+        let label = keys.label_at(timestamp);
+        encoder.write_frame(rasterizer.render(grid, Duration::from_secs(1) / FPS, label)?)?;
     }
     encoder.finish()
+}
+
+fn restore_editor(
+    nvim: &mut HeadlessNvim,
+    player: &Player,
+    timestamp: u64,
+    previous: &mut Option<EditorFrame>,
+) -> io::Result<()> {
+    // shortcut: seeking each frame repeats decoding within a keyframe, stream deltas if long exports are too slow
+    let frame = EditorFrame::from(player.seek(timestamp)?.snapshot);
+    if previous.as_ref() != Some(&frame) {
+        let lines = previous
+            .as_ref()
+            .is_none_or(|prev| prev.buffer_id != frame.buffer_id || prev.lines != frame.lines)
+            .then_some(&frame.lines);
+        nvim.request(
+            "nvim_exec_lua",
+            &(
+                "replay_apply_frame(...)",
+                (
+                    frame.buffer_id,
+                    frame.path.as_deref().unwrap_or_default(),
+                    frame.filetype.as_deref().unwrap_or_default(),
+                    lines,
+                    frame.row,
+                    frame.col,
+                    frame.topline,
+                ),
+            ),
+        )?;
+        *previous = Some(frame);
+    }
+    Ok(())
 }
 
 fn frame_times(duration_ns: u64) -> impl Iterator<Item = u64> {
@@ -179,6 +224,28 @@ fn frame_times(duration_ns: u64) -> impl Iterator<Item = u64> {
 mod tests {
     use super::*;
     use rmpv::Value;
+
+    #[test]
+    fn rapid_keys_share_a_line_until_the_next_pause() {
+        let mut keys = KeySequence::default();
+        assert_eq!(keys.label_at(0), None);
+        keys.push(0, "d".into());
+        keys.push(100_000_000, "i".into());
+        keys.push(200_000_000, "w".into());
+        assert_eq!(keys.label_at(1_199_999_999), Some("d i w"));
+        assert_eq!(keys.label_at(1_200_000_000), None);
+        keys.push(1_200_000_000, "Esc".into());
+        assert_eq!(keys.label_at(1_200_000_000), Some("Esc"));
+    }
+
+    #[test]
+    fn long_sequences_keep_the_most_recent_keys_in_order() {
+        let mut keys = KeySequence::default();
+        for key in ["a", "b", "c", "d", "e", "f", "g", "h", "Ctrl+W", "v"] {
+            keys.push(0, key.into());
+        }
+        assert_eq!(keys.label_at(0), Some("c d e f g h Ctrl+W v"));
+    }
 
     #[test]
     #[ignore = "requires Neovim on PATH"]

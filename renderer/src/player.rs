@@ -132,15 +132,24 @@ impl Player {
         }
     }
 
-    /// Visual deltas are applied from the first redraw in order, independently of editor keyframes.
-    pub fn visual_events(&self) -> impl Iterator<Item = io::Result<(u64, Value)>> + '_ {
+    /// Redraws and keystrokes are streamed in order, independently of editor keyframes.
+    pub fn visual_events(&self) -> impl Iterator<Item = io::Result<TimedEvent>> + '_ {
         let mut chunks = &self.file[self.index[0].1 as usize..self.footer_offset];
         let mut events = Vec::<TimedEvent>::new().into_iter();
+        let mut previous_ns = 0;
         std::iter::from_fn(move || {
             loop {
                 for timed in events.by_ref() {
-                    if let Event::UiRedraw { events } = timed.event {
-                        return Some(Ok((timed.timestamp_ns, events)));
+                    if matches!(timed.event, Event::UiRedraw { .. } | Event::KeyPress { .. }) {
+                        if timed.timestamp_ns < previous_ns
+                            || timed.timestamp_ns > self.header.duration_ns
+                        {
+                            return Some(Err(invalid_data(
+                                "unordered or out-of-range visual events",
+                            )));
+                        }
+                        previous_ns = timed.timestamp_ns;
+                        return Some(Ok(timed));
                     }
                 }
                 if chunks.is_empty() {
@@ -378,17 +387,37 @@ mod tests {
                 .await
                 .unwrap();
         }
+        recording
+            .push(
+                PushEvent {
+                    timestamp_ns: Some(10_100_000_000),
+                    event: Event::KeyPress {
+                        key: "Ctrl+W".into(),
+                    },
+                },
+                true,
+            )
+            .await
+            .unwrap();
         recording.stop().await.unwrap();
 
         let player = Player::open(&path).unwrap();
         assert_eq!(player.info().keyframes, [0, 10_000_000_000]);
         let mut grid = Grid::default();
-        for event in player.visual_events() {
-            grid.apply_redraw(&event.unwrap().1).unwrap();
+        let mut updates = player.visual_events();
+        for _ in 0..3 {
+            let Event::UiRedraw { events } = updates.next().unwrap().unwrap().event else {
+                panic!("expected redraw");
+            };
+            grid.apply_redraw(&events).unwrap();
             assert!(grid.complete());
         }
         let screen: String = grid.cells().iter().map(|cell| cell.text.as_ref()).collect();
         assert_eq!(screen, "AB");
+        let keypress = updates.next().unwrap().unwrap();
+        assert_eq!(keypress.timestamp_ns, 10_100_000_000);
+        assert!(matches!(keypress.event, Event::KeyPress { key } if key == "Ctrl+W"));
+        assert!(updates.next().is_none());
         assert!(player.seek(u64::MAX).unwrap().snapshot.buffers.is_empty());
     }
 
