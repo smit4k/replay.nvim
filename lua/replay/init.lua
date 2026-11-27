@@ -149,6 +149,7 @@ function M.render(input_or_output, output, ...)
       vimrc = render_vimrc(),
       cwd = vim.fn.getcwd(),
       font = render.font,
+      height = render.height,
       scale = render.scale,
     }
     request("replay_render", { input, output, startup }, function(err)

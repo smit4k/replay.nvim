@@ -1,13 +1,14 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use tempfile::TempDir;
 
 use super::rasterizer::RgbaFrame;
+use super::rgba_pipe;
 
-/// Streams fixed-size RGBA frames to FFmpeg at a constant frame rate.
+/// Streams timestamped RGBA frames to FFmpeg for constant-rate output.
 pub struct VideoEncoder {
     child: Child,
     destination: PathBuf,
@@ -15,7 +16,8 @@ pub struct VideoEncoder {
     width: u32,
     height: u32,
     frame_bytes: usize,
-    wrote_frame: bool,
+    fps: u32,
+    next_frame: u64,
 }
 
 impl VideoEncoder {
@@ -24,7 +26,7 @@ impl VideoEncoder {
         let frame_bytes = usize::try_from(u64::from(width) * u64::from(height))
             .ok()
             .and_then(|pixels| pixels.checked_mul(4))
-            .filter(|&bytes| bytes != 0 && fps != 0)
+            .filter(|&bytes| (1..=i32::MAX as usize - 4).contains(&bytes) && fps != 0)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid frame size or rate")
             })?;
@@ -37,17 +39,11 @@ impl VideoEncoder {
             "-n",
             "-xerror",
             "-f",
-            "rawvideo",
-            "-pixel_format",
-            "rgba",
-            "-video_size",
-            &format!("{width}x{height}"),
-            "-framerate",
-            &fps.to_string(),
+            "matroska",
             "-i",
             "pipe:0",
         ]);
-        match path.extension().and_then(|ext| ext.to_str()) {
+        let pixel_format = match path.extension().and_then(|ext| ext.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("mp4") => {
                 let pixel_format = if width.is_multiple_of(2) && height.is_multiple_of(2) {
                     "yuv420p"
@@ -57,18 +53,22 @@ impl VideoEncoder {
                 ffmpeg.args([
                     "-c:v",
                     "libx264",
+                    "-preset",
+                    "veryfast",
                     "-pix_fmt",
                     pixel_format,
                     "-crf",
-                    "12",
+                    "20",
                     "-movflags",
                     "+faststart",
                     "-f",
                     "mp4",
                 ]);
+                pixel_format
             }
             Some(ext) if ext.eq_ignore_ascii_case("mkv") => {
                 ffmpeg.args(["-c:v", "ffv1", "-pix_fmt", "bgra", "-f", "matroska"]);
+                "bgra"
             }
             _ => {
                 return Err(io::Error::new(
@@ -76,7 +76,8 @@ impl VideoEncoder {
                     "video output must end in .mp4 or .mkv",
                 ));
             }
-        }
+        };
+        ffmpeg.args(["-vf", &format!("format={pixel_format},fps={fps}")]);
         let destination = std::path::absolute(path)?;
         if destination.try_exists()? {
             return Err(io::Error::new(
@@ -98,18 +99,25 @@ impl VideoEncoder {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn()?;
-        Ok(Self {
+        let mut encoder = Self {
             child,
             destination,
             scratch,
             width,
             height,
             frame_bytes,
-            wrote_frame: false,
-        })
+            fps,
+            next_frame: 0,
+        };
+        let stdin =
+            encoder.child.stdin.as_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "FFmpeg stdin unavailable")
+            })?;
+        rgba_pipe::write_header(stdin, width, height, fps)?;
+        Ok(encoder)
     }
 
-    pub fn write_frame(&mut self, frame: RgbaFrame<'_>) -> io::Result<()> {
+    pub fn write_frame(&mut self, frame: RgbaFrame<'_>, last: bool) -> io::Result<()> {
         if (frame.width, frame.height) != (self.width, self.height)
             || frame.pixels.len() != self.frame_bytes
         {
@@ -123,15 +131,19 @@ impl VideoEncoder {
             .stdin
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "FFmpeg stdin closed"))?;
-        if let Err(error) = stdin.write_all(frame.pixels) {
+        // The last packet tells FFmpeg how long to hold a still frame at the end.
+        if (!frame.reused || self.next_frame == 0 || last)
+            && let Err(error) =
+                rgba_pipe::write_frame(stdin, frame.pixels, self.next_frame, self.fps)
+        {
             self.child.stdin.take();
             return Err(error);
         }
-        self.wrote_frame = true;
+        self.next_frame += 1;
         Ok(())
     }
 
-    /// Close the raw video stream and wait for FFmpeg to finalize the container.
+    /// Close the input stream and wait for FFmpeg to finalize the container.
     pub fn finish(mut self) -> io::Result<()> {
         let stream_closed_early = self.child.stdin.take().is_none();
         let status = self.child.wait()?;
@@ -144,7 +156,7 @@ impl VideoEncoder {
                 "FFmpeg input stream failed",
             ));
         }
-        if !self.wrote_frame {
+        if self.next_frame == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "no video frames written",
@@ -158,5 +170,51 @@ impl VideoEncoder {
 impl Drop for VideoEncoder {
     fn drop(&mut self) {
         super::reap_child(&mut self.child);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH"]
+    fn sparse_frames_preserve_every_output_frame() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("replay.mkv");
+        let first = [0x12, 0x34, 0xff, 0xe0].repeat(4);
+        let second = [0x80, 0xff, 0x34, 0xff].repeat(4);
+        let mut encoder = VideoEncoder::spawn(&path, 2, 2, 60)?;
+        for index in 0..93 {
+            encoder.write_frame(
+                RgbaFrame {
+                    width: 2,
+                    height: 2,
+                    pixels: if index < 61 { &first } else { &second },
+                    reused: index != 0 && index != 61,
+                },
+                index == 92,
+            )?;
+        }
+        encoder.finish()?;
+
+        let decoded = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args([
+                "-pix_fmt",
+                "rgba",
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()?;
+        assert!(decoded.status.success());
+        let mut expected = first.repeat(61);
+        expected.extend(second.repeat(32));
+        assert_eq!(decoded.stdout, expected);
+        Ok(())
     }
 }

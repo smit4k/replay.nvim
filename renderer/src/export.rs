@@ -50,6 +50,7 @@ pub(crate) struct RenderOptions {
     #[serde(flatten)]
     startup: NvimStartup,
     font: Option<String>,
+    height: Option<u32>,
     scale: Option<u32>,
 }
 
@@ -105,15 +106,23 @@ const SETUP_EDITOR: &str = r#"
 
 pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) -> io::Result<()> {
     let info = player.info();
-    let scale = options.scale.unwrap_or(2);
-    if !matches!(scale, 1 | 2) {
+    let height = match (options.height, options.scale.unwrap_or(1)) {
+        (Some(height), _) => height,
+        (None, scale @ (1 | 2)) => ROWS * CELL_HEIGHT * scale,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "render scale must be 1 or 2",
+            ));
+        }
+    };
+    if !matches!(height, 1080 | 1440 | 2160) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "render scale must be 1 or 2",
+            "render height must be 1080, 1440, or 2160",
         ));
     }
-    let width = COLUMNS * CELL_WIDTH * scale;
-    let height = ROWS * CELL_HEIGHT * scale;
+    let width = height * 16 / 9;
     let font = options.font.as_deref().map(Path::new);
     let mut rasterizer =
         Rasterizer::new(CELL_WIDTH, CELL_HEIGHT, 19.0, font, Some((width, height)))?;
@@ -149,12 +158,16 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
     let mut next = updates.next().transpose()?;
     let mut previous = None;
     let mut keys = KeySequence::default();
-    for timestamp in frame_times(info.duration_ns) {
+    let frame_duration = Duration::from_secs(1) / FPS;
+    let mut timestamps = frame_times(info.duration_ns).peekable();
+    while let Some(timestamp) = timestamps.next() {
+        let mut grid_changed = false;
         while let Some(update) = next.take_if(|update| update.timestamp_ns <= timestamp) {
             match update.event {
                 Event::UiRedraw { events } => {
                     if !std::mem::take(&mut skip_first_redraw) {
                         grid.apply_redraw(&events)?;
+                        grid_changed = true;
                     }
                 }
                 Event::KeyPress { key } if !key.is_empty() => keys.push(update.timestamp_ns, key),
@@ -163,6 +176,7 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
             next = updates.next().transpose()?;
         }
         let grid = if let Some(nvim) = &mut nvim {
+            grid_changed = true;
             restore_editor(nvim, player, timestamp, &mut previous)?;
             nvim.redraw()?
         } else if grid.complete() {
@@ -174,7 +188,8 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
             ));
         };
         let label = keys.label_at(timestamp);
-        encoder.write_frame(rasterizer.render(grid, Duration::from_secs(1) / FPS, label)?)?;
+        let frame = rasterizer.render(grid, frame_duration, label, grid_changed)?;
+        encoder.write_frame(frame, timestamps.peek().is_none())?;
     }
     encoder.finish()
 }

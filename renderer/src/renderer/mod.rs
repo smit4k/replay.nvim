@@ -3,6 +3,7 @@
 pub mod encoder;
 pub mod headless_nvim;
 pub mod rasterizer;
+mod rgba_pipe;
 
 use std::process::Child;
 

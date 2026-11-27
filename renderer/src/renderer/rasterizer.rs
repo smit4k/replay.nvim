@@ -18,6 +18,7 @@ pub struct RgbaFrame<'a> {
     pub height: u32,
     /// Tightly packed, row-major RGBA8 pixels.
     pub pixels: &'a [u8],
+    pub reused: bool,
 }
 
 /// Shapes text per grid cell so glyph advances never move later columns.
@@ -36,6 +37,7 @@ pub struct Rasterizer {
     origin: (f32, f32),
     pixmap: Pixmap,
     cursor: Option<(f32, f32)>,
+    rendered_key: Option<String>,
 }
 
 impl Rasterizer {
@@ -132,16 +134,28 @@ impl Rasterizer {
             origin: (0.0, 0.0),
             pixmap: new_pixmap(1, 1)?,
             cursor: None,
+            rendered_key: None,
         })
     }
 
-    /// Render a complete grid. Use elapsed video time to advance cursor motion.
+    /// Render a complete grid. Set `grid_changed` after any grid update.
     pub fn render(
         &mut self,
         grid: &Grid,
         elapsed: Duration,
         key: Option<&str>,
+        grid_changed: bool,
     ) -> io::Result<RgbaFrame<'_>> {
+        let key = key.unwrap_or_default();
+        let key_changed = self.rendered_key.as_deref() != Some(key);
+        // The cursor can still be moving between captured redraws.
+        if !grid_changed
+            && !key_changed
+            && self.cursor == grid.cursor().map(|(col, row)| (col as f32, row as f32))
+        {
+            return Ok(self.frame(true));
+        }
+
         let (columns, rows) = grid.dimensions();
         if columns == 0 || rows == 0 {
             return Err(io::Error::new(
@@ -218,15 +232,23 @@ impl Rasterizer {
             }
         }
         self.draw_cursor(grid, elapsed);
-        if let Some(key) = key.filter(|key| !key.is_empty()) {
+        if !key.is_empty() {
             self.draw_keystroke(key);
         }
+        if key_changed {
+            self.rendered_key = Some(key.to_owned());
+        }
 
-        Ok(RgbaFrame {
-            width,
-            height,
+        Ok(self.frame(false))
+    }
+
+    fn frame(&self, reused: bool) -> RgbaFrame<'_> {
+        RgbaFrame {
+            width: self.pixmap.width(),
+            height: self.pixmap.height(),
             pixels: self.pixmap.data(),
-        })
+            reused,
+        }
     }
 
     fn draw_keystroke(&mut self, key: &str) {
@@ -562,5 +584,49 @@ fn blend_glyph(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmpv::ext::to_value;
+
+    #[test]
+    #[ignore = "requires an installed monospace font"]
+    fn reused_frames_match_full_redraws() -> io::Result<()> {
+        let mut grid = Grid::default();
+        grid.apply_redraw(
+            &to_value((
+                ("grid_resize", (1, 10, 5)),
+                ("default_colors_set", (0xffffff, 0x303030, 0)),
+                ("grid_cursor_goto", (1, 0, 0)),
+                ("flush",),
+            ))
+            .map_err(io::Error::other)?,
+        )?;
+        let move_cursor =
+            to_value((("grid_cursor_goto", (1, 0, 5)), ("flush",))).map_err(io::Error::other)?;
+        let recolor = to_value((("default_colors_set", (0xffffff, 0x505050, 0)), ("flush",)))
+            .map_err(io::Error::other)?;
+        let mut cached = Rasterizer::new(12, 24, 19.0, None, Some((320, 180)))?;
+        let mut reference = Rasterizer::new(12, 24, 19.0, None, Some((320, 180)))?;
+        let elapsed = Duration::from_secs(1) / 60;
+
+        for index in 0..28 {
+            let redraw = match index {
+                4 => Some(&move_cursor),
+                24 => Some(&recolor),
+                _ => None,
+            };
+            if let Some(events) = redraw {
+                grid.apply_redraw(events)?;
+            }
+            let key = (1..3).contains(&index).then_some("Esc");
+            let expected = reference.render(&grid, elapsed, key, true)?;
+            let actual = cached.render(&grid, elapsed, key, redraw.is_some())?;
+            assert!(actual.pixels == expected.pixels, "frame {index} differs");
+        }
+        Ok(())
     }
 }

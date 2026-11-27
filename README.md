@@ -26,9 +26,11 @@ For a local checkout, replace `"smit4k/replay.nvim"` with `dir = "/path/to/repla
 
 In the same Neovim session, `:ReplayRender session.mp4` exports the most recently completed recording.
 
-Video export defaults to 3840 × 2160 at 60 fps. Use `.mp4` for H.264 or `.mkv` for lossless FFV1. Wait for the save notification before closing Neovim. Existing output files are protected.
+Video export defaults to 1920 × 1080 at 60 fps. Set `opts = { render = { height = 1440 } }` for 2560 × 1440 output. `render.height` accepts 1080, 1440, or 2160 and takes precedence over `render.scale`. `render.scale = 2` also selects 3840 × 2160.
 
-The renderer prefers an installed monospace Nerd Font. Set `opts = { render = { font = "JetBrainsMono Nerd Font Mono" } }` to pick an installed family, or use an absolute path to a font file. Set `render.scale = 1` for 1920 × 1080 output.
+Use `.mp4` for H.264 or `.mkv` for lossless FFV1. Wait for the save notification before closing Neovim. Existing output files are protected.
+
+The renderer prefers an installed monospace Nerd Font. Set `opts = { render = { font = "JetBrainsMono Nerd Font Mono" } }` to pick an installed family, or use an absolute path to a font file.
 
 New recordings from Neovim's terminal UI capture the visible screen, including Blink completion menus and inline suggestions when they appear. Live screen capture needs Neovim's local RPC socket. Earlier recordings can still be exported using their saved editor state.
 
