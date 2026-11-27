@@ -1,0 +1,18 @@
+[package]
+name = "replay-sidecar"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+memmap2 = "0.9"
+rmp-serde = "1"
+rmpv = { version = "1", features = ["with-serde"] }
+ropey = { version = "1", default-features = false, features = ["simd"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
