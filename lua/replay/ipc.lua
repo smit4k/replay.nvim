@@ -17,9 +17,9 @@ local function disconnect(state, reason)
   close(state.input)
   close(state.output)
   close(state.stderr)
-  for _, callback in pairs(state.pending) do
+  for _, request in pairs(state.pending) do
     vim.schedule(function()
-      callback(reason)
+      request.callback(reason)
     end)
   end
   if not state.stopping then
@@ -27,6 +27,28 @@ local function disconnect(state, reason)
       state.on_exit(reason)
     end)
   end
+end
+
+local function valid_message(message)
+  if type(message) ~= "table" then
+    return false
+  end
+  if message[1] == 1 then
+    return #message == 4
+  end
+  local params = message[3]
+  if message[1] ~= 2 or #message ~= 3 or message[2] ~= "replay_render_progress" or type(params) ~= "table" then
+    return false
+  end
+  local id, percent = params[1], params[2]
+  return #params == 2
+    and type(id) == "number"
+    and id >= 0
+    and id % 1 == 0
+    and type(percent) == "number"
+    and percent >= 1
+    and percent <= 100
+    and percent % 1 == 0
 end
 
 function M.start(command, on_exit)
@@ -95,22 +117,30 @@ function M.start(command, on_exit)
     local offset = 1
     while offset <= #data do
       local ok, message, next_offset = pcall(unpack, data, offset)
-      if not ok or (message ~= nil and (type(message) ~= "table" or message[1] ~= 1 or #message ~= 4)) then
+      if not ok or (message ~= nil and not valid_message(message)) then
         process:kill("sigterm")
         disconnect(state, "Invalid Msgpack-RPC response from replay sidecar")
         return
       end
       offset = next_offset
-      if message then
+      if message and message[1] == 2 then
+        local id, percent = message[3][1], message[3][2]
+        local request = state.pending[id]
+        if request and request.on_progress then
+          vim.schedule(function()
+            request.on_progress(percent)
+          end)
+        end
+      elseif message then
         local id, response_err, result = message[2], message[3], message[4]
-        local callback = state.pending[id]
-        state.pending[id] = nil
-        if callback then
+        local request = state.pending[id]
+        if request then
+          state.pending[id] = nil
           if response_err == vim.NIL then
             response_err = nil
           end
           vim.schedule(function()
-            callback(response_err, result)
+            request.callback(response_err, result)
           end)
         end
       end
@@ -135,7 +165,7 @@ function M.notify(method, params)
   return write(child, { 2, method, params })
 end
 
-function M.request(method, params, callback)
+function M.request(method, params, callback, on_progress)
   local state = child
   if not state then
     return nil, "Replay sidecar is disconnected"
@@ -146,7 +176,7 @@ function M.request(method, params, callback)
   if not request then
     return nil, err
   end
-  state.pending[id] = callback
+  state.pending[id] = { callback = callback, on_progress = on_progress }
   return request
 end
 

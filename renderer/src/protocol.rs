@@ -8,6 +8,9 @@
 //! - open_replay(path) -> ReplayInfo
 //! - seek_to(timestamp_ns) -> SeekResult
 //! - replay_render(input_path, output_path, render_options?) -> nil
+//!   With `progress = true` in render_options, the server sends
+//!   `[2, "replay_render_progress", [request_id, percent]]` before the reply.
+//!   100 means all frames were sent to the encoder. The reply confirms the save.
 //!
 //! The Lua client also uses record_start, record_stop, and record_event.
 //! Its events use "kind", "buf", and "win" as aliases for "type", "buffer_id",

@@ -1,4 +1,8 @@
-use std::{io, path::Path, time::Duration};
+use std::{
+    io,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use serde::Deserialize;
 
@@ -54,6 +58,8 @@ pub(crate) struct RenderOptions {
     font: Option<String>,
     height: Option<u32>,
     scale: Option<u32>,
+    #[serde(default)]
+    pub progress: bool,
 }
 
 const SETUP_EDITOR: &str = r#"
@@ -106,7 +112,12 @@ const SETUP_EDITOR: &str = r#"
   end
 "#;
 
-pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) -> io::Result<()> {
+pub(crate) fn render(
+    player: &Player,
+    output: &Path,
+    options: &RenderOptions,
+    mut on_progress: impl FnMut(u8),
+) -> io::Result<()> {
     let info = player.info();
     let height = match (options.height, options.scale.unwrap_or(1)) {
         (Some(height), _) => height,
@@ -161,8 +172,10 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
     let mut previous = None;
     let mut keys = KeySequence::default();
     let frame_duration = Duration::from_secs(1) / FPS;
-    let mut timestamps = frame_times(info.duration_ns).peekable();
-    while let Some(timestamp) = timestamps.next() {
+    let (total_frames, timestamps) = frame_times(info.duration_ns);
+    let mut reported = 0;
+    let mut last_report = Instant::now();
+    for (frame_number, timestamp) in (1..=total_frames).zip(timestamps) {
         let mut grid_changed = false;
         while let Some(update) = next.take_if(|update| update.timestamp_ns <= timestamp) {
             match update.event {
@@ -193,7 +206,15 @@ pub(crate) fn render(player: &Player, output: &Path, options: &RenderOptions) ->
         };
         let label = keys.label_at(timestamp);
         let frame = rasterizer.render(grid, frame_duration, label, grid_changed)?;
-        encoder.write_frame(frame, timestamps.peek().is_none())?;
+        encoder.write_frame(frame, frame_number == total_frames)?;
+        let percent = (frame_number * 100 / total_frames) as u8;
+        if percent > reported
+            && (percent == 100 || last_report.elapsed() >= Duration::from_millis(100))
+        {
+            on_progress(percent);
+            reported = percent;
+            last_report = Instant::now();
+        }
     }
     encoder.finish()
 }
@@ -231,18 +252,28 @@ fn restore_editor(
     Ok(())
 }
 
-fn frame_times(duration_ns: u64) -> impl Iterator<Item = u64> {
+fn frame_times(duration_ns: u64) -> (u128, impl Iterator<Item = u64>) {
     let second = Duration::from_secs(1).as_nanos();
     let duration = u128::from(duration_ns);
     let fps = u128::from(FPS);
-    let last_frame = (duration * fps).div_ceil(second);
-    (0..=last_frame).map(move |index| (index * second / fps).min(duration) as u64)
+    let count = (duration * fps).div_ceil(second) + 1;
+    let timestamps = (0..count).map(move |index| (index * second / fps).min(duration) as u64);
+    (count, timestamps)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rmpv::Value;
+
+    #[test]
+    fn frame_count_includes_the_last_partial_frame() {
+        let (count, timestamps) = frame_times(20_000_000);
+        assert_eq!(
+            (count, timestamps.collect::<Vec<_>>()),
+            (3, vec![0, 16_666_666, 20_000_000])
+        );
+    }
 
     #[test]
     fn rapid_keys_share_a_line_until_the_next_pause() {

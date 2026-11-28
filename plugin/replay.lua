@@ -5,6 +5,7 @@ vim.g.loaded_replay = true
 
 local commands = {
   ReplayStart = { method = "start", nargs = "?" },
+  ReplayEnd = { method = "stop", nargs = 0 },
   ReplayStop = { method = "stop", nargs = 0 },
   ReplayRender = { method = "render", nargs = "+" },
 }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rmpv::{Value, decode::read_value_with_max_depth, ext::from_value};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::watch;
 use tokio::task;
 
 use crate::export;
@@ -77,6 +78,7 @@ impl Session {
             let result = match (fields.next(), fields.next()) {
                 (Some(Value::String(method)), Some(Value::Array(params))) => {
                     match method.as_str() {
+                        Some("replay_render") => self.render(params, id, output).await,
                         Some(method) => self.dispatch(method, params, id.is_some()).await,
                         None => Err(invalid_data("RPC method must be a UTF-8 string")),
                     }
@@ -163,27 +165,50 @@ impl Session {
                     Ok(Reply::State(state))
                 }
             }
-            "replay_render" if (2..=3).contains(&params.len()) => {
-                if self.recording.is_some() {
-                    return Err(io::Error::other("stop recording before exporting a replay"));
-                }
-                let mut params = params.into_iter();
-                let input = PathBuf::from(required::<String>(params.next())?);
-                let output = PathBuf::from(required::<String>(params.next())?);
-                let options: export::RenderOptions = optional(params.next())?;
-                task::spawn_blocking(move || {
-                    export::render(&Player::open(&input)?, &output, &options)
-                })
-                .await
-                .map_err(io::Error::other)??;
-                Ok(Reply::Empty)
-            }
             "stop_recording" | "record_stop" | "push_event" | "record_event" | "open_replay"
-            | "replay_open" | "seek_to" | "replay_seek" | "replay_render" => Err(invalid_data(
-                format!("invalid parameter count for {method}"),
-            )),
+            | "replay_open" | "seek_to" | "replay_seek" => Err(invalid_data(format!(
+                "invalid parameter count for {method}"
+            ))),
             _ => Err(invalid_data(format!("unknown RPC method {method}"))),
         }
+    }
+
+    async fn render(
+        &self,
+        params: Vec<Value>,
+        id: Option<u32>,
+        output: &mut (impl AsyncWrite + Unpin),
+    ) -> io::Result<Reply> {
+        if !(2..=3).contains(&params.len()) {
+            return Err(invalid_data("invalid parameter count for replay_render"));
+        }
+        if self.recording.is_some() {
+            return Err(io::Error::other("stop recording before exporting a replay"));
+        }
+        let mut params = params.into_iter();
+        let input = PathBuf::from(required::<String>(params.next())?);
+        let destination = PathBuf::from(required::<String>(params.next())?);
+        let options: export::RenderOptions = optional(params.next())?;
+        let progress_id = id.filter(|_| options.progress);
+        let (progress, mut updates) = watch::channel(0);
+        let worker = task::spawn_blocking(move || {
+            export::render(&Player::open(&input)?, &destination, &options, |percent| {
+                if progress_id.is_some() {
+                    progress.send_replace(percent);
+                }
+            })
+        });
+        if let Some(id) = progress_id {
+            while updates.changed().await.is_ok() {
+                let percent = *updates.borrow_and_update();
+                output
+                    .write_all(&pack(&(2, "replay_render_progress", (id, percent)))?)
+                    .await?;
+                output.flush().await?;
+            }
+        }
+        worker.await.map_err(io::Error::other)??;
+        Ok(Reply::Empty)
     }
 }
 

@@ -13,7 +13,7 @@ Use Neovim 0.10 or later and a Rust toolchain to build the sidecar. For video ex
 return {
   "smit4k/replay.nvim",
   main = "replay",
-  cmd = { "ReplayStart", "ReplayStop", "ReplayRender" },
+  cmd = { "ReplayStart", "ReplayEnd", "ReplayStop", "ReplayRender" },
   build = "cargo build --release --locked --manifest-path renderer/Cargo.toml --target-dir renderer/target",
   opts = {},
 }
@@ -25,11 +25,15 @@ For a local checkout, replace `"smit4k/replay.nvim"` with `dir = "/path/to/repla
 
 ```vim
 :ReplayStart session.nvimreplay
-:ReplayStop
+:ReplayEnd
 :ReplayRender session.nvimreplay session.mp4
 ```
 
-In the same Neovim session, `:ReplayRender session.mp4` exports the most recently completed recording.
+`:ReplayStop` is an alias for `:ReplayEnd`. In the same Neovim session, `:ReplayRender session.mp4` exports the most recently completed recording.
+
+Replay uses `nvim-notify` when available and falls back to `vim.notify`. The recording save notification shows the replay duration. The export save notification shows the output path, render time, and file size in bytes.
+
+With `nvim-notify`, `:ReplayRender` opens a persistent notification and updates it with a frame progress bar. The same popup shows the save details or an error when the export ends. Older sidecar builds show the rendering status until the export ends.
 
 Video export defaults to 1920 × 1080 at 60 fps. Set `opts = { render = { height = 1440 } }` for 2560 × 1440 output. `render.height` accepts 1080, 1440, or 2160 and takes precedence over `render.scale`. `render.scale = 2` also selects 3840 × 2160.
 

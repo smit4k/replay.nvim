@@ -3,6 +3,7 @@ describe("replay commands", function()
     vim.cmd("runtime plugin/replay.lua")
 
     assert.equals(2, vim.fn.exists(":ReplayStart"))
+    assert.equals(2, vim.fn.exists(":ReplayEnd"))
     assert.equals(2, vim.fn.exists(":ReplayStop"))
     assert.equals(2, vim.fn.exists(":ReplayRender"))
     assert.equals(0, vim.fn.exists(":ReplayOpen"))
