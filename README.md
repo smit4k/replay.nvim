@@ -1,4 +1,9 @@
-# replay.nvim
+<h1 align='center'>
+    replay.nvim
+</h1>
+<p align='center'>
+  <b>Record your Neovim sessions and export them as videos</b>
+</p>
 
 ## Install with lazy.nvim
 
